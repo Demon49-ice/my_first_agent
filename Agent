@@ -1,0 +1,124 @@
+# -*- coding: utf-8 -*-
+"""
+第二周实践：手写一个简单 Agent
+在第一周多轮对话的基础上，增加工具调用能力
+"""
+
+import os
+import json
+from openai import OpenAI
+
+API_KEY  = os.environ.get("MOONSHOT_API_KEY","sk-gUzTSoRUqNJHxsQWqZdqBiCY1TB0G8zazvLpR258FEjLPCfT")
+BASE_URL = "https://api.moonshot.cn/v1"
+MODEL    = "kimi-k2.6" 
+MAX_LOOPS = 5   # Agent Loop 最大圈数，防止死循环（重要！）
+
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+
+# ============ 第 1 步：定义工具（说明书 + 真正的函数）============
+
+# 1a. 工具的"说明书"：发给模型看，告诉它有什么工具、怎么用
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "calculator",
+            "description": "计算数学表达式，当用户要求计算时使用",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "数学表达式，例如：23*47 或 (100+20)*3"
+                    }
+                },
+                "required": ["expression"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_balance",
+            "description": "查询用户的话费余额",
+            "parameters": {
+                "type": "object",
+                "properties": {},   # 模拟工具：不需要参数
+            }
+        }
+    }
+]
+
+# 1b. 工具的"真身"：真正执行的 Python 函数（这里用假数据模拟）
+def calculator(expression: str) -> str:
+    try:
+        result = eval(expression, {"__builtins__": {}}, {})  # 限制作用域的安全写法
+        return str(result)
+    except Exception as e:
+        return f"计算出错：{e}"
+
+def query_balance() -> str:
+    return "85.3元"   # 假数据，第 3 周再接真实接口
+
+# 工具名 → 函数的映射表，模型叫名字，代码找到真身执行
+TOOL_MAP = {
+    "calculator": calculator,
+    "query_balance": query_balance,
+}
+
+# ============ 第 2 步：Agent Loop ============
+
+messages = [{"role": "system", "content": "你是一个电信客服助手。需要计算或查数据时，使用提供的工具，不要自己编造数字。"}]
+
+def agent_run(user_input: str):
+    messages.append({"role": "user", "content": user_input})
+
+    for loop_count in range(MAX_LOOPS):          # 最多循环 5 圈
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=tools,                          # ← 把工具说明书一起发过去
+            temperature=1,
+        )
+        msg = resp.choices[0].message
+
+        # 情况 A：模型想直接回答 → 结束循环
+        if not msg.tool_calls:
+            messages.append({"role": "assistant", "content": msg.content})
+            return msg.content
+
+        # 情况 B：模型请求调用工具 → 执行并回填结果
+        messages.append(msg)                      # 先把模型的"调用请求"记入历史
+        for call in msg.tool_calls:
+            func_name = call.function.name
+            args = json.loads(call.function.arguments)   # 模型填的参数
+            print(f"  [Agent] 模型请求调用工具 {func_name}，参数：{args}")
+
+            result = TOOL_MAP[func_name](**args)          # 真正执行
+            print(f"  [Agent] 工具返回：{result}")
+
+            messages.append({                            # 结果以 tool 角色回传
+                "role": "tool",
+                "tool_call_id": call.id,                 # 必须带上，对应哪次调用
+                "content": result,
+            })
+        # 循环继续：带着工具结果再问模型一次
+
+    return "抱歉，处理这个问题时步骤太多了，请换个方式问我。"  # 超过最大圈数的兜底
+
+# ============ 第 3 步：主循环（和第一周一样）============
+
+print("Agent 已启动（输入 exit 退出）")
+print("试试问：「23*47 等于多少？」「我还剩多少话费？」「余额除以 2 是多少？」")
+
+while True:
+    user_input = input("\n你: ").strip()
+    if user_input.lower() in ("exit", "quit"):
+        break
+    if not user_input:
+        continue
+    try:
+        answer = agent_run(user_input)
+        print(f"助手: {answer}")
+    except Exception as e:
+        print(f"[出错了] {type(e).__name__}: {e}")
